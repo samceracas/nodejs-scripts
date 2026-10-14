@@ -80,7 +80,11 @@ A known case is `@sap/cds-dk` 10.x, which bundles `handlebars@4.7.9` and `proxy-
 
 ## Configuration
 
-`bundledPatches` maps a package name to its minimum safe version:
+### What `bundledPatches` is
+
+`bundledPatches` is **not an npm feature**. npm ignores keys in `package.json` that it doesn't recognize, so this is a config block that only `patch-bundled-deps.js` and `check-bundled-deps.js` read. Adding it does nothing until one of the scripts runs (normally through `postinstall`).
+
+It tells the scripts which packages to look for and the lowest safe version of each. It maps a package name to its minimum safe version:
 
 ```json
 "bundledPatches": {
@@ -89,6 +93,23 @@ A known case is `@sap/cds-dk` 10.x, which bundles `handlebars@4.7.9` and `proxy-
   "some-pkg": { "min": "3.0.0", "allowMajor": true }
 }
 ```
+
+This reads as: "any bundled copy of handlebars below 4.7.10, or of proxy-addr below 2.0.8, must be replaced."
+
+### What the patch script does with each entry
+
+Using `"handlebars": "4.7.10"` as the example:
+
+1. **Find the bundled copies.** Search `package-lock.json` for entries ending in `node_modules/handlebars` that are marked `"inBundle": true`. With `@sap/cds-dk` this finds `node_modules/@sap/cds-dk/node_modules/handlebars`.
+2. **Find the safe source.** Check that the top-level `node_modules/handlebars` exists and is at least 4.7.10. If it is missing or older, stop with an error, since there is nothing safe to copy from.
+3. **Compare versions.** Bundled copies below the minimum are replaced. Copies already at or above it are left alone.
+4. **Replace and record.** Delete the bundled folder, copy the top-level folder into its place, and update that entry's `version` in the lockfile so `npm audit` sees the fix.
+
+The check script uses the same entries, but only reads. It lists every installed copy of each package and fails if any copy on disk is below its minimum.
+
+The value is a **minimum, not a pin**. The script copies whatever version is installed at the top level, so if you later upgrade to handlebars 4.7.12, the bundled copy becomes 4.7.12 too. To control the exact version, control your top-level dependency.
+
+### Options
 
 | Option | Default | Meaning |
 |---|---|---|
