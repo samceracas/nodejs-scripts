@@ -6,7 +6,7 @@ Standalone Node.js scripts for use in any project. Each script lives in its own 
 
 | Folder | What it does |
 |---|---|
-| [`bundled-deps-patch`](./bundled-deps-patch) | Patches vulnerable dependencies that `npm audit fix` and `overrides` can't reach because another package bundles them (`bundleDependencies`). Example: handlebars 4.7.9 inside `@sap/cds-dk` |
+| [`bundled-deps-patch`](./bundled-deps-patch) | Patches vulnerable dependencies that npm `audit fix` and `overrides` can't reach because another package bundles them (`bundleDependencies`). Works in any npm project |
 
 ## Conventions
 

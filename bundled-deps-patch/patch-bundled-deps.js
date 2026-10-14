@@ -58,7 +58,7 @@ const readVersion = (dir) => {
 const MARKER = '.bundled-patch.json';
 const hasMarker = (dir) => fs.existsSync(path.join(dir, MARKER));
 
-// "node_modules/@sap/cds-dk/node_modules/handlebars" -> "@sap/cds-dk"
+// "node_modules/@scope/parent/node_modules/handlebars" -> "@scope/parent"
 const parentOf = (key, name) => {
   const parentPath = key.slice(0, -(`/node_modules/${name}`.length));
   return parentPath.slice(parentPath.lastIndexOf('node_modules/') + 'node_modules/'.length);
@@ -100,11 +100,18 @@ const config = Object.entries(pkg.bundledPatches || {}).map(([name, v]) =>
 
 if (!config.length) process.exit(0);
 if (!fs.existsSync(lockPath)) {
-  console.log(`${TAG} no package-lock.json, skipping`);
+  // Yarn and pnpm projects have no package-lock.json. Say so instead of silently passing.
+  console.warn(`${TAG} no package-lock.json found, skipping. Only npm projects (lockfile v2/v3) are supported.`);
   process.exit(0);
 }
 const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-const packages = lock.packages || {};
+if (!lock.packages) {
+  // lockfileVersion 1 (npm 6) has no "packages" map, so bundled copies can't be found reliably.
+  console.error(`${TAG} package-lock.json is lockfileVersion ${lock.lockfileVersion}. Upgrade to npm 7+ and ` +
+    `run npm install to convert it to lockfileVersion 2 or 3.`);
+  process.exit(1);
+}
+const packages = lock.packages;
 
 let lockChanged = false;
 let errors = 0;
