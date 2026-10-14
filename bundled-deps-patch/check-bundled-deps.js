@@ -22,7 +22,9 @@ for (const [name, v] of Object.entries(pkg.bundledPatches || {})) {
   for (const p of all.filter((p) => re.test('node_modules/' + p))) {
     const version = JSON.parse(fs.readFileSync(path.join(nm, p), 'utf8')).version;
     const ok = gte(version, min); if (!ok) bad++;
-    console.log(`${ok ? 'OK  ' : 'VULN'} ${name.padEnd(12)} ${version.padEnd(8)} ${path.relative(root, path.join(nm, path.dirname(p)))}`);
+    const dir = path.join(nm, path.dirname(p));
+    const patched = fs.existsSync(path.join(dir, '.bundled-patch.json')) ? ' (patched)' : '';
+    console.log(`${ok ? 'OK  ' : 'VULN'} ${name.padEnd(12)} ${version.padEnd(8)} ${path.relative(root, dir)}${patched}`);
   }
 }
 process.exit(bad ? 1 : 0);

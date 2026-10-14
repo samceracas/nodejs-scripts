@@ -124,7 +124,8 @@ Bundled copies are found from `package-lock.json` (entries with `"inBundle": tru
 | Situation | Result | Exit |
 |---|---|---|
 | Bundled copy below `min` | Replaced on disk, lockfile entry updated | 0 |
-| Already patched on disk or in the lockfile | Left alone. Safe to run any number of times | 0 |
+| Already patched by this script (marker present) | Logs "already patched". Safe to run any number of times | 0 |
+| Bundled copy already at or above `min` without a marker | The bundling package fixed it upstream. Logs that the entry can be removed | 0 |
 | Vulnerable bundled copy installed, top-level copy missing or below `min`, `fetch` off | Error with the two ways to fix it | 1 |
 | Same, with `fetch: true` | Downloads `<name>@<min>` and patches with it | 0 |
 | `fetch: true` but the download fails (registry unreachable, version not found, auth) | Error with npm's message | 1 |
@@ -313,7 +314,39 @@ Checklist for your pipeline:
 
 ## Removing it
 
-This is a workaround. When the upstream package ships a release that bundles the fixed version, remove that entry from `bundledPatches`. When the object is empty, remove the scripts and the `postinstall` line. To check what a release bundles without installing it:
+This is a workaround. The script tells you when it's no longer needed.
+
+### How it knows
+
+Every copy the script swaps in gets a small `.bundled-patch.json` marker file:
+
+```json
+{ "patchedBy": "patch-bundled-deps", "from": "4.7.9", "to": "4.7.10", "date": "2026-10-14T13:39:10.646Z" }
+```
+
+`npm ci` and fresh installs re-extract the bundle, so the marker disappears along with the old copy. After a fresh install, a bundled copy at or above `min` with no marker can only mean the bundling package shipped the fixed version itself. In that case the install prints:
+
+```
+[bundled-patch] handlebars: @sap/cds-dk now bundles 4.7.11 itself, no patch needed for it.
+[bundled-patch] handlebars: no installed copy needs this patch anymore. Remove "handlebars" from bundledPatches.
+```
+
+The checker also labels each copy it reads, so you can see which ones the script patched:
+
+```
+OK   handlebars   4.7.10   node_modules/@sap/cds-dk/node_modules/handlebars (patched)
+```
+
+### Workflow
+
+1. Upgrade the bundling package when a new version comes out (for example when a pre-commit hook or Dependabot reports a newer `@sap/cds-dk`).
+2. Run a full `npm install`.
+3. If the output says an entry is no longer needed, remove it from `bundledPatches`. Also remove any `fetch` setup or devDependency you added only as a patch source.
+4. When `bundledPatches` is empty, remove the scripts, the `postinstall` line, and the checker step from CI.
+
+A leftover entry is harmless. The script finds nothing below `min` and does nothing, so forgetting step 3 costs clutter, not a broken build.
+
+To check what a release bundles without installing it:
 
 ```bash
 npm pack @sap/cds-dk@latest

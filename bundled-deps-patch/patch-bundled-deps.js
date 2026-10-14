@@ -24,6 +24,10 @@
  *
  * Usage: node patch-bundled-deps.js [--root <project-dir>]
  *
+ * Every copy it swaps in gets a ".bundled-patch.json" marker. A bundled copy that is already
+ * patched but has no marker was fixed by the bundling package itself, and the script says
+ * the entry can be removed.
+ *
  * Exit codes: 0 = done or nothing to do, 1 = a vulnerable copy is installed and could not be patched.
  */
 const fs = require('fs');
@@ -48,6 +52,19 @@ const readVersion = (dir) => {
   try { return JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).version; }
   catch { return null; }
 };
+
+// Marker left in every copy this script swaps in. A bundled copy at or above `min` without
+// the marker was shipped that way by the bundling package, so the entry is no longer needed.
+const MARKER = '.bundled-patch.json';
+const hasMarker = (dir) => fs.existsSync(path.join(dir, MARKER));
+
+// "node_modules/@sap/cds-dk/node_modules/handlebars" -> "@sap/cds-dk"
+const parentOf = (key, name) => {
+  const parentPath = key.slice(0, -(`/node_modules/${name}`.length));
+  return parentPath.slice(parentPath.lastIndexOf('node_modules/') + 'node_modules/'.length);
+};
+const upstreamFixed = (name, key, version) =>
+  `${TAG} ${name}: ${parentOf(key, name)} now bundles ${version} itself, no patch needed for it.`;
 
 const tempDirs = [];
 process.on('exit', () => tempDirs.forEach((d) => fs.rmSync(d, { recursive: true, force: true })));
@@ -112,9 +129,18 @@ for (const { name, min, allowMajor, fetch } of config) {
 
   if (!vulnerableOnDisk.length && !staleInLock.length) {
     const installed = bundled.filter((k) => readVersion(path.join(root, k)));
-    console.log(installed.length
-      ? `${TAG} ${name}: already patched`
-      : `${TAG} ${name}: bundling package not installed (e.g. --omit=dev), nothing to do`);
+    if (!installed.length) {
+      console.log(`${TAG} ${name}: bundling package not installed (e.g. --omit=dev), nothing to do`);
+      continue;
+    }
+    const fixedUpstream = installed.filter((k) => !hasMarker(path.join(root, k)));
+    for (const k of fixedUpstream) console.log(upstreamFixed(name, k, readVersion(path.join(root, k))));
+    if (fixedUpstream.length === installed.length) {
+      console.log(`${TAG} ${name}: no installed copy needs this patch anymore. ` +
+        `Remove "${name}" from bundledPatches.`);
+    } else {
+      console.log(`${TAG} ${name}: already patched`);
+    }
     continue;
   }
 
@@ -164,7 +190,16 @@ for (const { name, min, allowMajor, fetch } of config) {
     if (diskVersion && !gte(diskVersion, min)) {
       fs.rmSync(target, { recursive: true, force: true });
       fs.cpSync(source, target, { recursive: true });
-      console.log(`${TAG} ${name}: ${key} ${diskVersion} -> ${readVersion(target)}`);
+      const newVersion = readVersion(target);
+      fs.writeFileSync(path.join(target, MARKER), JSON.stringify({
+        patchedBy: 'patch-bundled-deps',
+        from: diskVersion,
+        to: newVersion,
+        date: new Date().toISOString(),
+      }, null, 2) + '\n');
+      console.log(`${TAG} ${name}: ${key} ${diskVersion} -> ${newVersion}`);
+    } else if (diskVersion && !hasMarker(target)) {
+      console.log(upstreamFixed(name, key, diskVersion));
     } else if (diskVersion) {
       console.log(`${TAG} ${name}: ${key} already ${diskVersion}`);
     }
