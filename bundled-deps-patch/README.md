@@ -41,7 +41,7 @@ A known case is `@sap/cds-dk` 10.x, which bundles `handlebars@4.7.9` and `proxy-
    npm i -D handlebars@^4.7.10     # or "dependencies" if your app uses it directly
    ```
 
-   Do this even if the package is already there transitively, so a future dependency change can't silently remove your source copy.
+   Do this even if the package is already there transitively, so a future dependency change can't silently remove your source copy. If your project doesn't use the package itself, see [Projects that don't use the package directly](#projects-that-dont-use-the-package-directly).
 
 3. Configure `package.json`:
 
@@ -126,7 +126,9 @@ Bundled copies are found from `package-lock.json` (entries with `"inBundle": tru
 |---|---|---|
 | Bundled copy below `min` | Replaced on disk, lockfile entry updated | 0 |
 | Already patched on disk or in the lockfile | Left alone. Safe to run any number of times | 0 |
-| Top-level copy missing or below `min` | Error with the `npm i -D` command to run | 1 |
+| Vulnerable bundled copy installed, top-level copy missing or below `min` | Error with the commands to run | 1 |
+| Bundling package not installed (for example `npm ci --omit=dev` skipped `@sap/cds-dk`) | Logs "nothing to do" | 0 |
+| Lockfile entry below `min`, but no vulnerable copy installed | Warning to run a full `npm install` | 0 |
 | Swap would cross a major version without `allowMajor` | Skipped with a warning | 0 |
 | Package not bundled anywhere | Logs "nothing to do" | 0 |
 | No `bundledPatches` key or no lockfile | Does nothing | 0 |
@@ -201,11 +203,35 @@ node scripts/check-bundled-deps.js --root gen/srv
 
 If an output folder does contain a package that bundles a vulnerable dependency (a production dependency, not a dev tool), copy the scripts into that folder as part of the build so the patch runs there too.
 
+## Projects that don't use the package directly
+
+Example: your project never uses handlebars, but `@sap/cds-dk` bundles a vulnerable copy. The script still needs a patched copy at `node_modules/handlebars` to copy from, and nothing puts one there. Without it, the install fails with:
+
+```
+[bundled-patch] handlebars: top-level copy is missing, need >= 4.7.10. Run: npm i -D handlebars@^4.7.10, then run npm install again (npm skips this project's postinstall when you install a package by name).
+```
+
+Fix:
+
+```bash
+npm i -D handlebars@^4.7.10
+npm install            # required: npm i <pkg> does not run your project's postinstall
+npm run check:bundled
+```
+
+Notes:
+
+- **Use `-D` (devDependencies).** The patched copy is only there as a source for the swap. As a devDependency it is not installed in production builds and not shipped with your app.
+- **Run `npm install` again after adding it.** npm runs the root project's `postinstall` only on a plain `npm install` or `npm ci`, not when you install a package by name. Skipping this leaves the bundled copy vulnerable until the next full install. CI is unaffected because it runs `npm ci`.
+- **Production installs at the project root still work.** `npm ci --omit=dev` skips both `@sap/cds-dk` and your devDependency copy. With no vulnerable copy on disk, the script logs "nothing to do" and exits 0.
+- **`overrides` works with a devDependency.** `"overrides": { "handlebars": "$handlebars" }` resolves against devDependencies too.
+- **Add a comment for your team.** Someone may later remove the "unused" devDependency. A note in the PR or README explaining why it's there saves a confusing failed install later. If it does get removed, the install fails with the error above, so the vulnerable copy never ships silently.
+
 ## Adding a package later
 
 1. In `npm audit`, the finding's path contains another package's `node_modules/`, and the lockfile entry has `"inBundle": true`.
 2. A fixed version exists. If the advisory range is `*`, nothing can be patched yet, so wait for upstream.
-3. `npm i -D <name>@^<fixed>`.
+3. `npm i -D <name>@^<fixed>`, then `npm install` so the postinstall runs.
 4. Add `"<name>": "<fixed>"` to `bundledPatches`.
 5. Reinstall, run the check, and smoke test the parent package.
 

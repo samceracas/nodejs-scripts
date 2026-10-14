@@ -71,12 +71,36 @@ for (const { name, min, allowMajor } of config) {
     continue;
   }
 
+  // What actually needs work: vulnerable copies on disk, and lockfile entries still below min.
+  const vulnerableOnDisk = bundled.filter((k) => {
+    const v = readVersion(path.join(root, k));
+    return v && !gte(v, min);
+  });
+  const staleInLock = bundled.filter((k) => !gte(packages[k].version, min));
+
+  if (!vulnerableOnDisk.length && !staleInLock.length) {
+    const installed = bundled.filter((k) => readVersion(path.join(root, k)));
+    console.log(installed.length
+      ? `${TAG} ${name}: already patched`
+      : `${TAG} ${name}: bundling package not installed (e.g. --omit=dev), nothing to do`);
+    continue;
+  }
+
   const source = path.join(root, suffix);
   const srcVersion = readVersion(source);
   if (!srcVersion || !gte(srcVersion, min)) {
-    console.error(`${TAG} ${name}: top-level copy is ${srcVersion || 'missing'}, need >= ${min}. ` +
-      `Run: npm i -D ${name}@^${min}`);
-    configErrors++;
+    if (vulnerableOnDisk.length) {
+      // A vulnerable copy is installed and there is nothing safe to copy from: fail loudly.
+      console.error(`${TAG} ${name}: top-level copy is ${srcVersion || 'missing'}, need >= ${min}. ` +
+        `Run: npm i -D ${name}@^${min}, then run npm install again (npm skips this project's ` +
+        `postinstall when you install a package by name).`);
+      configErrors++;
+    } else {
+      // Only the lockfile is stale and nothing vulnerable is on disk (e.g. a production install
+      // that omits the dev tool that bundles it). Don't break the install over it.
+      console.warn(`${TAG} ${name}: lockfile still lists a version below ${min}, but no vulnerable copy ` +
+        `is installed. Run a full npm install to update the lockfile.`);
+    }
     continue;
   }
 
