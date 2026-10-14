@@ -48,7 +48,7 @@ A known case is `@sap/cds-dk` 10.x, which bundles `handlebars@4.7.9` and `proxy-
    ```json
    {
      "scripts": {
-       "postinstall": "node scripts/patch-bundled-deps.js",
+       "postinstall": "node -e \"require('fs').existsSync('scripts/patch-bundled-deps.js') && require('./scripts/patch-bundled-deps.js')\"",
        "check:bundled": "node scripts/check-bundled-deps.js"
      },
      "overrides": {
@@ -60,6 +60,8 @@ A known case is `@sap/cds-dk` 10.x, which bundles `handlebars@4.7.9` and `proxy-
      }
    }
    ```
+
+   The `postinstall` line only runs the script if the file exists. This matters when your package.json is copied somewhere without the `scripts/` folder (see [Build outputs](#build-outputs-cap-mta-docker)). It's written in Node rather than shell (`[ -f ... ]`) so it also works on Windows. A config error inside the script still fails the install.
 
    `overrides` is optional but recommended. It handles any *non-bundled* nested copies, which npm can resolve on its own. `$handlebars` means "the version in my dependencies". It requires the package to be a direct dependency, which step 2 ensures.
 
@@ -147,6 +149,18 @@ npm ci --ignore-scripts
 node scripts/patch-bundled-deps.js
 node scripts/check-bundled-deps.js   # fails the build if anything is still vulnerable
 ```
+
+## Build outputs (CAP, MTA, Docker)
+
+Some build tools copy `package.json` into an output folder without your `scripts/` folder, then run `npm install` or `npm ci` there. CAP is one example: `cds build` writes `gen/srv/package.json` with your `scripts` block intact. When the MTA builder installs inside `gen/srv`, an unguarded `"postinstall": "node scripts/patch-bundled-deps.js"` fails with `MODULE_NOT_FOUND`.
+
+The guarded `postinstall` from [Setup](#setup) skips the script when the file is missing. That is safe in these folders: they install production dependencies only, so dev tools like `@sap/cds-dk` and their bundles are not present and there is nothing to patch. To confirm, run the checker against the output folder after the build:
+
+```bash
+node scripts/check-bundled-deps.js --root gen/srv
+```
+
+If an output folder does contain a package that bundles a vulnerable dependency (a production dependency, not a dev tool), copy the scripts into that folder as part of the build so the patch runs there too.
 
 ## Adding a package later
 
