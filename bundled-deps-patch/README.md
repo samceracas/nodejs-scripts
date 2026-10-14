@@ -152,13 +152,52 @@ node scripts/check-bundled-deps.js   # fails the build if anything is still vuln
 
 ## Build outputs (CAP, MTA, Docker)
 
-Some build tools copy `package.json` into an output folder without your `scripts/` folder, then run `npm install` or `npm ci` there. CAP is one example: `cds build` writes `gen/srv/package.json` with your `scripts` block intact. When the MTA builder installs inside `gen/srv`, an unguarded `"postinstall": "node scripts/patch-bundled-deps.js"` fails with `MODULE_NOT_FOUND`.
+Some build tools copy `package.json` into an output folder without your `scripts/` folder, then run `npm install` or `npm ci` there. CAP is one example: `cds build` writes `gen/srv/package.json` with your `scripts` block intact. When the MTA builder installs inside `gen/srv`, an unguarded `"postinstall": "node scripts/patch-bundled-deps.js"` fails.
 
-The guarded `postinstall` from [Setup](#setup) skips the script when the file is missing. That is safe in these folders: they install production dependencies only, so dev tools like `@sap/cds-dk` and their bundles are not present and there is nothing to patch. To confirm, run the checker against the output folder after the build:
+### The error
+
+In a CI pipeline (Jenkins shown here), it looks like this:
+
+```
+Error: Cannot find module '/home/jenkins/agent/<project>/gen/srv/scripts/patch-bundled-deps.js'
+code: 'MODULE_NOT_FOUND'
+npm error command sh -c node scripts/patch-bundled-deps.js
+```
+
+npm runs `postinstall` from the folder being installed, so the relative path `scripts/patch-bundled-deps.js` resolves to `gen/srv/scripts/patch-bundled-deps.js`. `cds build` never copies `scripts/` there, so the file does not exist.
+
+### How the guard fixes it
+
+Use the guarded `postinstall` from [Setup](#setup):
+
+```json
+"postinstall": "node -e \"require('fs').existsSync('scripts/patch-bundled-deps.js') && require('./scripts/patch-bundled-deps.js')\""
+```
+
+| Where npm installs | `existsSync` checks | Result |
+|---|---|---|
+| Project root | `<project>/scripts/patch-bundled-deps.js` (exists) | `require` runs the patch as usual |
+| `gen/srv` | `<project>/gen/srv/scripts/patch-bundled-deps.js` (missing) | Returns `false`, `&&` short-circuits, `require` never runs, install continues with exit 0 |
+
+Skipping inside `gen/srv` is safe. That folder installs production dependencies only, so dev tools like `@sap/cds-dk` and their bundles are not present and there is nothing to patch. To confirm, run the checker against the output folder after the build:
 
 ```bash
 node scripts/check-bundled-deps.js --root gen/srv
 ```
+
+### Pipeline checklist
+
+- **Commit the updated `package.json`.** `cds build` copies `package.json` at build time, so `gen/srv` only gets the guarded line once the change is in the commit the pipeline builds.
+- **Make sure `gen/` is regenerated.** If `gen/` is committed or cached between builds, delete it so `cds build` writes a fresh `gen/srv/package.json`.
+- **Keep the escapes.** The command sits inside a JSON string, so copy it exactly, including the `\"` escapes.
+- **Test locally before pushing:**
+
+  ```bash
+  npx cds build --production
+  npm run postinstall                       # root: prints [bundled-patch] lines
+  (cd gen/srv && npm run postinstall)       # gen/srv: no output, exit code 0
+  (cd gen/srv && npm ci --omit=dev)         # same install the MTA builder runs
+  ```
 
 If an output folder does contain a package that bundles a vulnerable dependency (a production dependency, not a dev tool), copy the scripts into that folder as part of the build so the patch runs there too.
 
