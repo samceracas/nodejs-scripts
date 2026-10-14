@@ -4,7 +4,7 @@ Patches vulnerable dependencies that npm cannot update because another package s
 
 | Script | What it does |
 |---|---|
-| `patch-bundled-deps.js` | Replaces each bundled copy with your top-level patched copy, and updates the matching `package-lock.json` entries so `npm audit` and lockfile scanners (Snyk, Mend, Black Duck) see the fix |
+| `patch-bundled-deps.js` | Replaces each bundled copy with a patched copy (yours, or downloaded from the registry), and updates the matching `package-lock.json` entries so `npm audit` and lockfile scanners (Snyk, Mend, Black Duck) see the fix |
 | `check-bundled-deps.js` | Lists every installed copy of each configured package and exits `1` if any copy on disk is still vulnerable |
 
 No dependencies. Requires Node.js 18.17+ or 20.1+ (uses recursive `fs.readdirSync`) and npm 7+ (lockfile v2/v3).
@@ -35,13 +35,10 @@ A known case is `@sap/cds-dk` 10.x, which bundles `handlebars@4.7.9` and `proxy-
 
    If the repo is private, copy the files manually instead.
 
-2. Install the patched version at the top level of your project. The script copies from `node_modules/<name>`, so it must be there:
+2. Make sure the script has a patched copy to swap in. Pick one:
 
-   ```bash
-   npm i -D handlebars@^4.7.10     # or "dependencies" if your app uses it directly
-   ```
-
-   Do this even if the package is already there transitively, so a future dependency change can't silently remove your source copy. If your project doesn't use the package itself, see [Projects that don't use the package directly](#projects-that-dont-use-the-package-directly).
+   - **Your app uses the package directly:** bump it in `dependencies`, for example `npm i handlebars@^4.7.10`. The script copies from `node_modules/handlebars`.
+   - **Your app doesn't use it:** add `"fetch": true` to its `bundledPatches` entry (step 3) and the script downloads the patched version itself. No new dependency needed. Alternatively, `npm i -D handlebars@^4.7.10`. See [Projects that don't use the package directly](#projects-that-dont-use-the-package-directly) for the trade-offs.
 
 3. Configure `package.json`:
 
@@ -92,7 +89,8 @@ It tells the scripts which packages to look for and the lowest safe version of e
 "bundledPatches": {
   "handlebars": "4.7.10",
   "proxy-addr": { "min": "2.0.8" },
-  "some-pkg": { "min": "3.0.0", "allowMajor": true }
+  "some-pkg": { "min": "3.0.0", "allowMajor": true },
+  "other-pkg": { "min": "1.2.3", "fetch": true }
 }
 ```
 
@@ -103,13 +101,13 @@ This reads as: "any bundled copy of handlebars below 4.7.10, or of proxy-addr be
 Using `"handlebars": "4.7.10"` as the example:
 
 1. **Find the bundled copies.** Search `package-lock.json` for entries ending in `node_modules/handlebars` that are marked `"inBundle": true`. With `@sap/cds-dk` this finds `node_modules/@sap/cds-dk/node_modules/handlebars`.
-2. **Find the safe source.** Check that the top-level `node_modules/handlebars` exists and is at least 4.7.10. If it is missing or older, stop with an error, since there is nothing safe to copy from.
+2. **Find the safe source.** Use the top-level `node_modules/handlebars` if it exists and is at least 4.7.10. Otherwise, if the entry has `"fetch": true`, download exactly `handlebars@4.7.10` from the registry. If neither is available, stop with an error, since there is nothing safe to copy from.
 3. **Compare versions.** Bundled copies below the minimum are replaced. Copies already at or above it are left alone.
-4. **Replace and record.** Delete the bundled folder, copy the top-level folder into its place, and update that entry's `version` in the lockfile so `npm audit` sees the fix.
+4. **Replace and record.** Delete the bundled folder, copy the safe source into its place, and update that entry's `version` in the lockfile so `npm audit` sees the fix.
 
 The check script uses the same entries, but only reads. It lists every installed copy of each package and fails if any copy on disk is below its minimum.
 
-The value is a **minimum, not a pin**. The script copies whatever version is installed at the top level, so if you later upgrade to handlebars 4.7.12, the bundled copy becomes 4.7.12 too. To control the exact version, control your top-level dependency.
+When the source is your top-level copy, the value is a **minimum, not a pin**. The script copies whatever version is installed, so if you later upgrade to handlebars 4.7.12, the bundled copy becomes 4.7.12 too. With `"fetch": true` and no top-level copy, the script downloads exactly the `min` version, so builds stay reproducible.
 
 ### Options
 
@@ -117,6 +115,7 @@ The value is a **minimum, not a pin**. The script copies whatever version is ins
 |---|---|---|
 | `min` | required | Copies below this version are replaced. The string form `"x.y.z"` is shorthand for `{ "min": "x.y.z" }` |
 | `allowMajor` | `false` | Allow replacing a bundled copy with a different major version (for example 3.x with 4.x). Only enable this after testing the parent package |
+| `fetch` | `false` | If the package is not installed at the top level, download exactly `<name>@<min>` from the registry with `npm pack` instead of failing. See [Projects that don't use the package directly](#projects-that-dont-use-the-package-directly) |
 
 Bundled copies are found from `package-lock.json` (entries with `"inBundle": true`), not from hardcoded paths. If another package starts bundling the same dependency, it is picked up automatically.
 
@@ -126,7 +125,9 @@ Bundled copies are found from `package-lock.json` (entries with `"inBundle": tru
 |---|---|---|
 | Bundled copy below `min` | Replaced on disk, lockfile entry updated | 0 |
 | Already patched on disk or in the lockfile | Left alone. Safe to run any number of times | 0 |
-| Vulnerable bundled copy installed, top-level copy missing or below `min` | Error with the commands to run | 1 |
+| Vulnerable bundled copy installed, top-level copy missing or below `min`, `fetch` off | Error with the two ways to fix it | 1 |
+| Same, with `fetch: true` | Downloads `<name>@<min>` and patches with it | 0 |
+| `fetch: true` but the download fails (registry unreachable, version not found, auth) | Error with npm's message | 1 |
 | Bundling package not installed (for example `npm ci --omit=dev` skipped `@sap/cds-dk`) | Logs "nothing to do" | 0 |
 | Lockfile entry below `min`, but no vulnerable copy installed | Warning to run a full `npm install` | 0 |
 | Swap would cross a major version without `allowMajor` | Skipped with a warning | 0 |
@@ -205,13 +206,31 @@ If an output folder does contain a package that bundles a vulnerable dependency 
 
 ## Projects that don't use the package directly
 
-Example: your project never uses handlebars, but `@sap/cds-dk` bundles a vulnerable copy. The script still needs a patched copy at `node_modules/handlebars` to copy from, and nothing puts one there. Without it, the install fails with:
+Example: your project never uses handlebars, but `@sap/cds-dk` bundles a vulnerable copy. The script needs a patched copy to swap in, and your `node_modules` has none. Without one, the install fails with:
 
 ```
-[bundled-patch] handlebars: top-level copy is missing, need >= 4.7.10. Run: npm i -D handlebars@^4.7.10, then run npm install again (npm skips this project's postinstall when you install a package by name).
+[bundled-patch] handlebars: top-level copy is missing, need >= 4.7.10. Either set "handlebars": { "min": "4.7.10", "fetch": true } in bundledPatches to download it, or run npm i -D handlebars@^4.7.10 and then npm install again (npm skips this project's postinstall when you install a package by name).
 ```
 
-Fix:
+There are two ways to fix it.
+
+### Option A: download it at install time (no new dependency)
+
+```json
+"bundledPatches": {
+  "handlebars": { "min": "4.7.10", "fetch": true }
+}
+```
+
+The script downloads exactly `handlebars@4.7.10` with `npm pack` into a temp folder, swaps it in, and deletes the temp folder. Nothing is added to `dependencies`, `devDependencies` or the lockfile's top level.
+
+- **Same registry as your install.** `npm pack` reads the same `.npmrc` files as `npm ci` (project, user, and CI-provided), so a private registry, mirror (Artifactory, Nexus) or proxy works without extra setup. If `npm ci` can reach the registry, so can the script.
+- **Integrity checked.** `npm pack` verifies the tarball against the registry's integrity hash.
+- **Exact version.** It always downloads `min`, never "latest", so every build gets the same copy. To move to a newer patch release, raise `min`.
+- **Only when needed.** No download happens when the bundled copy is already patched, when the bundling package isn't installed (`npm ci --omit=dev`), or when a suitable top-level copy already exists.
+- **Needs `tar`.** It ships with Linux, macOS and Windows 10+, and with the official Node Docker images.
+
+### Option B: add it as a devDependency
 
 ```bash
 npm i -D handlebars@^4.7.10
@@ -219,20 +238,47 @@ npm install            # required: npm i <pkg> does not run your project's posti
 npm run check:bundled
 ```
 
-Notes:
+Use this if your pipeline has no registry access during install, or if you want the patched version recorded in the lockfile.
 
-- **Use `-D` (devDependencies).** The patched copy is only there as a source for the swap. As a devDependency it is not installed in production builds and not shipped with your app.
-- **Run `npm install` again after adding it.** npm runs the root project's `postinstall` only on a plain `npm install` or `npm ci`, not when you install a package by name. Skipping this leaves the bundled copy vulnerable until the next full install. CI is unaffected because it runs `npm ci`.
-- **Production installs at the project root still work.** `npm ci --omit=dev` skips both `@sap/cds-dk` and your devDependency copy. With no vulnerable copy on disk, the script logs "nothing to do" and exits 0.
+- **Use `-D`.** The copy is only a source for the swap. As a devDependency it is not installed in production builds.
+- **Run `npm install` again after adding it.** npm runs the root project's `postinstall` only on a plain `npm install` or `npm ci`, not when you install a package by name. CI is unaffected because it runs `npm ci`.
 - **`overrides` works with a devDependency.** `"overrides": { "handlebars": "$handlebars" }` resolves against devDependencies too.
-- **Add a comment for your team.** Someone may later remove the "unused" devDependency. A note in the PR or README explaining why it's there saves a confusing failed install later. If it does get removed, the install fails with the error above, so the vulnerable copy never ships silently.
+- **Leave a note for your team.** Someone may later remove the "unused" devDependency. If they do, the install fails with the error above, so the vulnerable copy never ships silently.
+
+### Which one
+
+| | Option A (`fetch`) | Option B (devDependency) |
+|---|---|---|
+| Changes your dependencies | No | Yes, one devDependency |
+| Patched version in lockfile top level | No | Yes |
+| Needs registry access in `postinstall` | Yes (same as `npm ci`) | No |
+| Version | Exactly `min` | Whatever `^min` resolves to |
+
+## CI/CD pipelines (Jenkins, GitHub Actions, Azure DevOps)
+
+Tested on a simulated clean agent (empty home folder, empty npm cache, `CI=true`): `npm ci`, `cds build --production`, and `npm ci --omit=dev` inside `gen/srv` all pass, with and without `fetch`, and `npm audit` no longer reports the patched packages.
+
+Checklist for your pipeline:
+
+- **Node.js 18.17+ or 20.1+**, npm 7+.
+- **`postinstall` must run.** If the pipeline uses `npm ci --ignore-scripts`, add explicit steps after install:
+
+  ```bash
+  npm ci --ignore-scripts
+  node scripts/patch-bundled-deps.js
+  node scripts/check-bundled-deps.js
+  ```
+
+- **With `fetch`:** the agent needs the same registry access `npm ci` already uses, a writable temp folder, and `tar`. Registry settings come from `.npmrc`, so if the pipeline injects one (for example a Jenkins config file provider for Artifactory), the download uses it automatically.
+- **Commit `package.json`, `package-lock.json` and the scripts.** For CAP projects also see [Build outputs](#build-outputs-cap-mta-docker) for the guarded `postinstall`.
+- **Optional gate:** run `node scripts/check-bundled-deps.js` as its own step. It exits 1 if any vulnerable copy is still on disk, which fails the build.
 
 ## Adding a package later
 
 1. In `npm audit`, the finding's path contains another package's `node_modules/`, and the lockfile entry has `"inBundle": true`.
 2. A fixed version exists. If the advisory range is `*`, nothing can be patched yet, so wait for upstream.
-3. `npm i -D <name>@^<fixed>`, then `npm install` so the postinstall runs.
-4. Add `"<name>": "<fixed>"` to `bundledPatches`.
+3. Add `"<name>": "<fixed>"` to `bundledPatches`. If your project doesn't already install a patched copy, either add `"fetch": true` or run `npm i -D <name>@^<fixed>` (see [Projects that don't use the package directly](#projects-that-dont-use-the-package-directly)).
+4. Run `npm install` so the postinstall runs.
 5. Reinstall, run the check, and smoke test the parent package.
 
 ## Removing it
@@ -248,4 +294,5 @@ tar -xOzf sap-cds-dk-*.tgz package/node_modules/handlebars/package.json | grep '
 
 - The swapped-in copy was never tested by the parent package's maintainers. Keep the patch within the same major version and smoke test after each change.
 - Only npm is supported. Yarn and pnpm use different lockfile formats.
+- Only the package folder is swapped. Its own dependencies resolve from the parent's bundle. If a patched version adds a new dependency the bundle doesn't have, the parent fails at runtime, so smoke test after each change.
 - The lockfile edit changes only `version` on `inBundle` entries. Those entries have no `resolved` or `integrity` fields, so nothing else needs to change.

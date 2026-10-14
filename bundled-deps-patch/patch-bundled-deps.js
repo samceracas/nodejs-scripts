@@ -4,7 +4,7 @@
  * (bundleDependencies). npm never resolves bundled packages, so `npm audit fix`
  * and `overrides` cannot update them. This runs after install and:
  *
- *   1. replaces each bundled copy on disk with your top-level (patched) copy
+ *   1. replaces each bundled copy on disk with a patched copy
  *   2. updates the matching "inBundle" entries in package-lock.json so
  *      `npm audit` and lockfile scanners report the patched version
  *
@@ -13,18 +13,23 @@
  *   "bundledPatches": {
  *     "handlebars": "4.7.10",                               // minimum safe version
  *     "proxy-addr": { "min": "2.0.8" },
- *     "some-pkg":   { "min": "3.0.0", "allowMajor": true }  // opt in to cross-major swaps
+ *     "some-pkg":   { "min": "3.0.0", "allowMajor": true }, // opt in to cross-major swaps
+ *     "other-pkg":  { "min": "1.2.3", "fetch": true }       // download the patch from the registry
  *   }
  *
- * The patched version must be installed at the top level (node_modules/<name>).
- * If it is not, add it to devDependencies, e.g. `npm i -D proxy-addr@^2.0.8`.
+ * Where the patched copy comes from:
+ *   - node_modules/<name> in your project, if it is installed and >= min
+ *   - otherwise, with "fetch": true, exactly <name>@<min> downloaded with `npm pack`
+ *     (uses your normal npm registry, proxy and auth settings)
  *
  * Usage: node patch-bundled-deps.js [--root <project-dir>]
  *
- * Exit codes: 0 = done or nothing to do, 1 = config problem (missing/old source).
+ * Exit codes: 0 = done or nothing to do, 1 = a vulnerable copy is installed and could not be patched.
  */
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 // Project root: --root <dir>, otherwise the current directory (npm runs scripts from the package root).
 const rootArg = process.argv.indexOf('--root');
@@ -44,10 +49,37 @@ const readVersion = (dir) => {
   catch { return null; }
 };
 
+const tempDirs = [];
+process.on('exit', () => tempDirs.forEach((d) => fs.rmSync(d, { recursive: true, force: true })));
+
+// Runs npm the same way across platforms. Inside an npm script, npm_execpath points at npm's CLI.
+const runNpm = (args) => {
+  const opts = { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] };
+  const cli = process.env.npm_execpath;
+  if (cli && /npm-cli\.js$/.test(cli)) return execFileSync(process.execPath, [cli, ...args], opts);
+  return execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, { ...opts, shell: process.platform === 'win32' });
+};
+
+// Downloads <name>@<version> from the registry and returns the extracted package folder.
+// `npm pack` verifies the tarball against the registry's integrity hash.
+const fetchFromRegistry = (name, version) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bundled-patch-'));
+  tempDirs.push(dir);
+  const out = runNpm(['pack', `${name}@${version}`, '--json', '--pack-destination', dir]);
+  const tarball = path.join(dir, JSON.parse(out)[0].filename);
+  const extractTo = path.join(dir, 'x');
+  fs.mkdirSync(extractTo);
+  // tar ships with Linux, macOS and Windows 10+.
+  execFileSync('tar', ['-xzf', tarball, '-C', extractTo], { stdio: 'pipe' });
+  return path.join(extractTo, 'package');
+};
+
 // --- config ---------------------------------------------------------------
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const config = Object.entries(pkg.bundledPatches || {}).map(([name, v]) =>
-  typeof v === 'string' ? { name, min: v, allowMajor: false } : { name, allowMajor: false, ...v });
+  typeof v === 'string'
+    ? { name, min: v, allowMajor: false, fetch: false }
+    : { name, allowMajor: false, fetch: false, ...v });
 
 if (!config.length) process.exit(0);
 if (!fs.existsSync(lockPath)) {
@@ -58,9 +90,9 @@ const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
 const packages = lock.packages || {};
 
 let lockChanged = false;
-let configErrors = 0;
+let errors = 0;
 
-for (const { name, min, allowMajor } of config) {
+for (const { name, min, allowMajor, fetch } of config) {
   // Bundled copies are found from the lockfile, so new bundling packages are picked up automatically.
   const suffix = `node_modules/${name}`;
   const bundled = Object.keys(packages).filter((k) =>
@@ -86,22 +118,36 @@ for (const { name, min, allowMajor } of config) {
     continue;
   }
 
-  const source = path.join(root, suffix);
-  const srcVersion = readVersion(source);
-  if (!srcVersion || !gte(srcVersion, min)) {
-    if (vulnerableOnDisk.length) {
-      // A vulnerable copy is installed and there is nothing safe to copy from: fail loudly.
-      console.error(`${TAG} ${name}: top-level copy is ${srcVersion || 'missing'}, need >= ${min}. ` +
-        `Run: npm i -D ${name}@^${min}, then run npm install again (npm skips this project's ` +
-        `postinstall when you install a package by name).`);
-      configErrors++;
-    } else {
-      // Only the lockfile is stale and nothing vulnerable is on disk (e.g. a production install
-      // that omits the dev tool that bundles it). Don't break the install over it.
-      console.warn(`${TAG} ${name}: lockfile still lists a version below ${min}, but no vulnerable copy ` +
-        `is installed. Run a full npm install to update the lockfile.`);
-    }
+  if (!vulnerableOnDisk.length) {
+    // Only the lockfile is stale and nothing vulnerable is on disk (e.g. a production install
+    // that omits the dev tool that bundles it). Don't break the install or hit the network over it.
+    console.warn(`${TAG} ${name}: lockfile still lists a version below ${min}, but no vulnerable copy ` +
+      `is installed. Run a full npm install to update the lockfile.`);
     continue;
+  }
+
+  // Find a patched source: the project's own copy first, then the registry if allowed.
+  let source = path.join(root, suffix);
+  let srcVersion = readVersion(source);
+  if (!srcVersion || !gte(srcVersion, min)) {
+    if (!fetch) {
+      console.error(`${TAG} ${name}: top-level copy is ${srcVersion || 'missing'}, need >= ${min}. Either ` +
+        `set "${name}": { "min": "${min}", "fetch": true } in bundledPatches to download it, or run ` +
+        `npm i -D ${name}@^${min} and then npm install again (npm skips this project's postinstall ` +
+        `when you install a package by name).`);
+      errors++;
+      continue;
+    }
+    try {
+      source = fetchFromRegistry(name, min);
+      srcVersion = readVersion(source);
+      console.log(`${TAG} ${name}: fetched ${name}@${srcVersion} from the registry`);
+    } catch (e) {
+      const detail = String(e.stderr || e.message).split('\n').filter(Boolean).slice(0, 3).join(' | ');
+      console.error(`${TAG} ${name}: could not download ${name}@${min} from the registry: ${detail}`);
+      errors++;
+      continue;
+    }
   }
 
   for (const key of bundled) {
@@ -132,4 +178,4 @@ for (const { name, min, allowMajor } of config) {
 }
 
 if (lockChanged) fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n');
-process.exit(configErrors ? 1 : 0);
+process.exit(errors ? 1 : 0);
