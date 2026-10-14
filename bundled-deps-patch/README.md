@@ -60,7 +60,7 @@ A known case is `@sap/cds-dk` 10.x, which bundles `handlebars@4.7.9` and `proxy-
 
    The `postinstall` line only runs the script if the file exists. This matters when your package.json is copied somewhere without the `scripts/` folder (see [Build outputs](#build-outputs-cap-mta-docker)). It's written in Node rather than shell (`[ -f ... ]`) so it also works on Windows. A config error inside the script still fails the install.
 
-   `overrides` is optional but recommended. It handles any *non-bundled* nested copies, which npm can resolve on its own. `$handlebars` means "the version in my dependencies". It requires the package to be a direct dependency, which step 2 ensures.
+   `overrides` is optional but recommended. The syntax depends on whether the package is a direct dependency. See [`overrides` and how it fits in](#overrides-and-how-it-fits-in).
 
 4. Reinstall and verify:
 
@@ -242,7 +242,7 @@ Use this if your pipeline has no registry access during install, or if you want 
 
 - **Use `-D`.** The copy is only a source for the swap. As a devDependency it is not installed in production builds.
 - **Run `npm install` again after adding it.** npm runs the root project's `postinstall` only on a plain `npm install` or `npm ci`, not when you install a package by name. CI is unaffected because it runs `npm ci`.
-- **`overrides` works with a devDependency.** `"overrides": { "handlebars": "$handlebars" }` resolves against devDependencies too.
+- **`overrides` works with a devDependency.** `"$handlebars"` resolves against devDependencies too. See [`overrides` and how it fits in](#overrides-and-how-it-fits-in).
 - **Leave a note for your team.** Someone may later remove the "unused" devDependency. If they do, the install fails with the error above, so the vulnerable copy never ships silently.
 
 ### Which one
@@ -253,6 +253,36 @@ Use this if your pipeline has no registry access during install, or if you want 
 | Patched version in lockfile top level | No | Yes |
 | Needs registry access in `postinstall` | Yes (same as `npm ci`) | No |
 | Version | Exactly `min` | Whatever `^min` resolves to |
+
+## `overrides` and how it fits in
+
+A project can have two kinds of vulnerable copies, and each needs a different fix:
+
+| Copy | Example | Fixed by |
+|---|---|---|
+| **Bundled** (`"inBundle": true` in the lockfile) | `node_modules/@sap/cds-dk/node_modules/handlebars` | This script. npm ignores `overrides` for bundled copies |
+| **Normal** (resolved by npm) | `node_modules/handlebars` installed for `@sap/hdi-deploy`, which declares `handlebars: ^4.7.9` | npm `overrides`. This script never touches non-bundled copies |
+
+So `overrides` is still relevant even when the script downloads its patch with `fetch`. The script only fixes the bundle. If another dependency pulls in a normal copy and your lockfile still pins the old version, that copy stays vulnerable, and `check-bundled-deps.js` fails the build until you fix it. Tested: with `@sap/hdi-deploy` as a dependency and a lockfile pinning 4.7.9, the bundle was patched, but the top-level copy stayed at 4.7.9 until an override was added.
+
+Which syntax to use depends on whether the package is a direct dependency:
+
+| Your project | Use | Why |
+|---|---|---|
+| Has it in `dependencies` or `devDependencies` | `"handlebars": "$handlebars"` | Follows your own version, so the two never disagree. A literal range that differs from your dependency fails with `EOVERRIDE` |
+| Doesn't have it (for example, using `fetch`) | `"handlebars": "^4.7.10"` | `$handlebars` fails with `Unable to resolve reference $handlebars` when there's no direct dependency to refer to |
+
+```jsonc
+// direct dependency
+"dependencies": { "handlebars": "^4.7.10" },
+"overrides":    { "handlebars": "$handlebars" }
+
+// no direct dependency (fetch)
+"overrides":      { "handlebars": "^4.7.10" },
+"bundledPatches": { "handlebars": { "min": "4.7.10", "fetch": true } }
+```
+
+If no other package in your project depends on the vulnerable package normally, the override does nothing. It's still worth keeping as protection against a future dependency pulling in an old copy.
 
 ## CI/CD pipelines (Jenkins, GitHub Actions, Azure DevOps)
 
